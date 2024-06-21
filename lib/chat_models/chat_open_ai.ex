@@ -32,7 +32,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
   # even when multiple requests could be issued based on the prompt.
 
   # allow up to 1 minute for response.
-  @receive_timeout 60_000
+  @receive_timeout 240_000
 
   @primary_key false
   embedded_schema do
@@ -391,6 +391,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
         headers: [
           {"api-key", get_api_key(openai)}
         ],
+	connect_options: [timeout: 120_000, protocols: [:http1]],
         receive_timeout: openai.receive_timeout,
         retry: :transient,
         max_retries: 3,
@@ -442,7 +443,8 @@ defmodule LangChain.ChatModels.ChatOpenAI do
       headers: [
         {"api-key", get_api_key(openai)}
       ],
-      receive_timeout: openai.receive_timeout
+      receive_timeout: openai.receive_timeout,
+      connect_options: [timeout: 120_000,protocols: [:http1]]	
     )
     |> maybe_add_org_id_header()
     |> Req.post(
