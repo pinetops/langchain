@@ -1,7 +1,7 @@
 defmodule LangChain.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.3.0-rc.0"
 
   def project do
     [
@@ -37,8 +37,8 @@ defmodule LangChain.MixProject do
     [
       {:ecto, "~> 3.10 or ~> 3.11"},
       {:gettext, "~> 0.20"},
-      {:req, ">= 0.4.8"},
-      {:abacus, "~> 2.0.0"},
+      {:req, ">= 0.5.0"},
+      {:abacus, "~> 2.1.0"},
       {:nx, ">= 0.7.0", optional: true},
       {:ex_doc, "~> 0.27", only: :dev, runtime: false}
     ]
@@ -60,6 +60,8 @@ defmodule LangChain.MixProject do
   end
 
   defp package do
+    # Note: the Livebook notebooks and related files are not included in the
+    # package.
     [
       files: ["lib", "mix.exs", "README*", "LICENSE*"],
       maintainers: ["Mark Ericksen"],

@@ -1,9 +1,9 @@
-defmodule ChatModels.ChatGoogleAITest do
-  alias LangChain.ChatModels.ChatGoogleAI
+defmodule ChatModels.ChatVertexAITest do
+  alias LangChain.ChatModels.ChatVertexAI
   use LangChain.BaseCase
 
-  doctest LangChain.ChatModels.ChatGoogleAI
-  alias LangChain.ChatModels.ChatGoogleAI
+  doctest LangChain.ChatModels.ChatVertexAI
+  alias LangChain.ChatModels.ChatVertexAI
   alias LangChain.Message
   alias LangChain.Message.ContentPart
   alias LangChain.Message.ToolCall
@@ -19,72 +19,51 @@ defmodule ChatModels.ChatGoogleAITest do
         function: fn _args, _context -> {:ok, "Hello world!"} end
       })
 
-    model = ChatGoogleAI.new!(%{})
-
-    %{model: model, hello_world: hello_world}
+    %{hello_world: hello_world}
   end
 
   describe "new/1" do
     test "works with minimal attr" do
-      assert {:ok, %ChatGoogleAI{} = google_ai} = ChatGoogleAI.new(%{"model" => "gemini-pro"})
-      assert google_ai.model == "gemini-pro"
+      assert {:ok, %ChatVertexAI{} = vertex_ai} =
+               ChatVertexAI.new(%{"model" => "gemini-pro", "endpoint" => "http://localhost:1234/"})
+
+      assert vertex_ai.model == "gemini-pro"
     end
 
     test "returns error when invalid" do
-      assert {:error, changeset} = ChatGoogleAI.new(%{"model" => nil})
+      assert {:error, changeset} = ChatVertexAI.new(%{"model" => nil})
       refute changeset.valid?
       assert {"can't be blank", _} = changeset.errors[:model]
-    end
-
-    test "supports overriding the API endpoint" do
-      override_url = "http://localhost:1234/"
-
-      model =
-        ChatGoogleAI.new!(%{
-          endpoint: override_url
-        })
-
-      assert model.endpoint == override_url
-    end
-
-    test "supports overriding the API version" do
-      api_version = "v1"
-
-      model =
-        ChatGoogleAI.new!(%{
-          api_version: api_version
-        })
-
-      assert model.api_version == api_version
     end
   end
 
   describe "for_api/3" do
     setup do
-      {:ok, google_ai} =
-        ChatGoogleAI.new(%{
+      {:ok, vertex_ai} =
+        ChatVertexAI.new(%{
           "model" => "gemini-pro",
+          "endpoint" => "http://localhost:1234/",
           "temperature" => 1.0,
           "top_p" => 1.0,
           "top_k" => 1.0
         })
 
-      %{google_ai: google_ai}
+      %{vertex_ai: vertex_ai}
     end
 
-    test "generates a map for an API call", %{google_ai: google_ai} do
-      data = ChatGoogleAI.for_api(google_ai, [], [])
+    test "generates a map for an API call", %{vertex_ai: vertex_ai} do
+      data = ChatVertexAI.for_api(vertex_ai, [], [])
       assert %{"contents" => [], "generationConfig" => config} = data
       assert %{"temperature" => 1.0, "topK" => 1.0, "topP" => 1.0} = config
     end
 
-    test "generates a map containing user and assistant messages", %{google_ai: google_ai} do
+    test "generates a map containing user and assistant messages", %{vertex_ai: vertex_ai} do
       user_message = "Hello Assistant!"
       assistant_message = "Hello User!"
 
       data =
-        ChatGoogleAI.for_api(
-          google_ai,
+        ChatVertexAI.for_api(
+          vertex_ai,
           [
             Message.new_user!(user_message),
             Message.new_assistant!(assistant_message)
@@ -97,14 +76,14 @@ defmodule ChatModels.ChatGoogleAITest do
       assert %{"role" => :model, "parts" => [%{"text" => ^assistant_message}]} = msg2
     end
 
-    test "generates a map containing function and function call messages", %{google_ai: google_ai} do
+    test "generates a map containing function and function call messages", %{vertex_ai: vertex_ai} do
       message = "Can you do an action for me?"
       arguments = %{"args" => "data"}
       function_result = %{"result" => "data"}
 
       data =
-        ChatGoogleAI.for_api(
-          google_ai,
+        ChatVertexAI.for_api(
+          vertex_ai,
           [
             Message.new_user!(message),
             Message.new_assistant!(%{
@@ -149,10 +128,10 @@ defmodule ChatModels.ChatGoogleAITest do
              } = tool_result
     end
 
-    test "expands system messages into two", %{google_ai: google_ai} do
+    test "expands system messages into two", %{vertex_ai: vertex_ai} do
       message = "These are some instructions."
 
-      data = ChatGoogleAI.for_api(google_ai, [Message.new_system!(message)], [])
+      data = ChatVertexAI.for_api(vertex_ai, [Message.new_system!(message)], [])
 
       assert %{"contents" => [msg1, msg2]} = data
       assert %{"role" => :user, "parts" => [%{"text" => ^message}]} = msg1
@@ -160,10 +139,10 @@ defmodule ChatModels.ChatGoogleAITest do
     end
 
     test "generates a map containing function declarations", %{
-      google_ai: google_ai,
+      vertex_ai: vertex_ai,
       hello_world: hello_world
     } do
-      data = ChatGoogleAI.for_api(google_ai, [], [hello_world])
+      data = ChatVertexAI.for_api(vertex_ai, [], [hello_world])
 
       assert %{"contents" => []} = data
       assert %{"tools" => [tool_call]} = data
@@ -181,7 +160,7 @@ defmodule ChatModels.ChatGoogleAITest do
   end
 
   describe "do_process_response/2" do
-    test "handles receiving a message", %{model: model} do
+    test "handles receiving a message" do
       response = %{
         "candidates" => [
           %{
@@ -192,14 +171,14 @@ defmodule ChatModels.ChatGoogleAITest do
         ]
       }
 
-      assert [%Message{} = struct] = ChatGoogleAI.do_process_response(model, response)
+      assert [%Message{} = struct] = ChatVertexAI.do_process_response(response)
       assert struct.role == :assistant
       [%ContentPart{type: :text, content: "Hello User!"}] = struct.content
       assert struct.index == 0
       assert struct.status == :complete
     end
 
-    test "error if receiving non-text content", %{model: model} do
+    test "error if receiving non-text content" do
       response = %{
         "candidates" => [
           %{
@@ -210,11 +189,11 @@ defmodule ChatModels.ChatGoogleAITest do
         ]
       }
 
-      assert [{:error, error_string}] = ChatGoogleAI.do_process_response(model, response)
+      assert [{:error, error_string}] = ChatVertexAI.do_process_response(response)
       assert error_string == "role: is invalid"
     end
 
-    test "handles receiving function calls", %{model: model} do
+    test "handles receiving function calls" do
       args = %{"args" => "data"}
 
       response = %{
@@ -230,7 +209,7 @@ defmodule ChatModels.ChatGoogleAITest do
         ]
       }
 
-      assert [%Message{} = struct] = ChatGoogleAI.do_process_response(model, response)
+      assert [%Message{} = struct] = ChatVertexAI.do_process_response(response)
       assert struct.role == :assistant
       assert struct.index == 0
       [call] = struct.tool_calls
@@ -238,7 +217,7 @@ defmodule ChatModels.ChatGoogleAITest do
       assert call.arguments == args
     end
 
-    test "handles receiving MessageDeltas as well", %{model: model} do
+    test "handles receiving MessageDeltas as well" do
       response = %{
         "candidates" => [
           %{
@@ -252,16 +231,14 @@ defmodule ChatModels.ChatGoogleAITest do
         ]
       }
 
-      assert [%MessageDelta{} = struct] =
-               ChatGoogleAI.do_process_response(model, response, MessageDelta)
-
+      assert [%MessageDelta{} = struct] = ChatVertexAI.do_process_response(response, MessageDelta)
       assert struct.role == :assistant
       assert struct.content == "This is the first part of a mes"
       assert struct.index == 0
       assert struct.status == :incomplete
     end
 
-    test "handles API error messages", %{model: model} do
+    test "handles API error messages" do
       response = %{
         "error" => %{
           "code" => 400,
@@ -270,20 +247,20 @@ defmodule ChatModels.ChatGoogleAITest do
         }
       }
 
-      assert {:error, error_string} = ChatGoogleAI.do_process_response(model, response)
+      assert {:error, error_string} = ChatVertexAI.do_process_response(response)
       assert error_string == "Invalid request"
     end
 
-    test "handles Jason.DecodeError", %{model: model} do
+    test "handles Jason.DecodeError" do
       response = {:error, %Jason.DecodeError{}}
 
-      assert {:error, error_string} = ChatGoogleAI.do_process_response(model, response)
+      assert {:error, error_string} = ChatVertexAI.do_process_response(response)
       assert "Received invalid JSON:" <> _ = error_string
     end
 
-    test "handles unexpected response with error", %{model: model} do
+    test "handles unexpected response with error" do
       response = %{}
-      assert {:error, "Unexpected response"} = ChatGoogleAI.do_process_response(model, response)
+      assert {:error, "Unexpected response"} = ChatVertexAI.do_process_response(response)
     end
   end
 
@@ -299,10 +276,10 @@ defmodule ChatModels.ChatGoogleAITest do
         }
       ]
 
-      assert [%{"text" => _}] = ChatGoogleAI.filter_parts_for_types(parts, ["text"])
+      assert [%{"text" => _}] = ChatVertexAI.filter_parts_for_types(parts, ["text"])
 
       assert [%{"functionCall" => _}] =
-               ChatGoogleAI.filter_parts_for_types(parts, ["functionCall"])
+               ChatVertexAI.filter_parts_for_types(parts, ["functionCall"])
     end
 
     test "returns a set of types" do
@@ -316,7 +293,7 @@ defmodule ChatModels.ChatGoogleAITest do
         }
       ]
 
-      assert parts == ChatGoogleAI.filter_parts_for_types(parts, ["text", "functionCall"])
+      assert parts == ChatVertexAI.filter_parts_for_types(parts, ["text", "functionCall"])
     end
   end
 
@@ -324,7 +301,7 @@ defmodule ChatModels.ChatGoogleAITest do
     test "returns basic text as a ContentPart" do
       message = Message.new_user!("Howdy!")
 
-      result = ChatGoogleAI.get_message_contents(message)
+      result = ChatVertexAI.get_message_contents(message)
 
       assert result == [%{"text" => "Howdy!"}]
     end
@@ -336,7 +313,7 @@ defmodule ChatModels.ChatGoogleAITest do
           ContentPart.new!(%{type: :text, content: "What's up?"})
         ])
 
-      result = ChatGoogleAI.get_message_contents(message)
+      result = ChatVertexAI.get_message_contents(message)
 
       assert result == [
                %{"text" => "Hello!"},
@@ -347,8 +324,8 @@ defmodule ChatModels.ChatGoogleAITest do
 
   describe "serialize_config/2" do
     test "does not include the API key or callbacks" do
-      model = ChatGoogleAI.new!(%{model: "gpt-4o"})
-      result = ChatGoogleAI.serialize_config(model)
+      model = ChatVertexAI.new!(%{model: "gemini-pro", endpoint: "http://localhost:1234/"})
+      result = ChatVertexAI.serialize_config(model)
       assert result["version"] == 1
       refute Map.has_key?(result, "api_key")
       refute Map.has_key?(result, "callbacks")
@@ -356,28 +333,24 @@ defmodule ChatModels.ChatGoogleAITest do
 
     test "creates expected map" do
       model =
-        ChatGoogleAI.new!(%{
-          model: "gpt-4o",
-          temperature: 0,
-          frequency_penalty: 0.5,
-          seed: 123,
-          max_tokens: 1234,
-          stream_options: %{include_usage: true}
+        ChatVertexAI.new!(%{
+          model: "gemini-pro",
+          endpoint: "http://localhost:1234/"
         })
 
-      result = ChatGoogleAI.serialize_config(model)
+      result = ChatVertexAI.serialize_config(model)
 
       assert result == %{
-               "endpoint" => "https://generativelanguage.googleapis.com/v1beta",
-               "model" => "gpt-4o",
-               "module" => "Elixir.LangChain.ChatModels.ChatGoogleAI",
+               "endpoint" => "http://localhost:1234/",
+               "model" => "gemini-pro",
+               "module" => "Elixir.LangChain.ChatModels.ChatVertexAI",
                "receive_timeout" => 60000,
                "stream" => false,
-               "temperature" => 0.0,
-               "version" => 1,
-               "api_version" => "v1beta",
+               "temperature" => 0.9,
                "top_k" => 1.0,
-               "top_p" => 1.0
+               "top_p" => 1.0,
+               "version" => 1,
+               "json_response" => false
              }
     end
   end

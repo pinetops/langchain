@@ -5,6 +5,7 @@ defmodule LangChain.MessageTest do
   alias LangChain.Message.ToolCall
   alias LangChain.Message.ToolResult
   alias LangChain.Message.ContentPart
+  alias LangChain.PromptTemplate
   alias LangChain.LangChainError
 
   describe "new/1" do
@@ -166,6 +167,23 @@ defmodule LangChain.MessageTest do
              ]
     end
 
+    test "accepts PromptTemplates in content list" do
+      assert {:ok, %Message{} = msg} =
+               Message.new_user([
+                 PromptTemplate.from_template!(
+                   "My name is <%= @name %> and here's a picture of me:"
+                 ),
+                 ContentPart.image!(:base64.encode("fake_image_data"))
+               ])
+
+      assert msg.role == :user
+
+      assert msg.content == [
+               %PromptTemplate{text: "My name is <%= @name %> and here's a picture of me:"},
+               %ContentPart{type: :image, content: "ZmFrZV9pbWFnZV9kYXRh", options: []}
+             ]
+    end
+
     test "does not accept invalid contents" do
       assert {:error, changeset} = Message.new_user(123)
       assert {"must be text or a list of ContentParts", _} = changeset.errors[:content]
@@ -308,6 +326,120 @@ defmodule LangChain.MessageTest do
       assert_raise LangChainError, "Can only append tool results to a tool role message.", fn ->
         Message.append_tool_result(user_message, result)
       end
+    end
+  end
+
+  describe "is_tool_call?/1" do
+    test "returns true when a tool call" do
+      msg =
+        Message.new_assistant!(%{
+          tool_calls: [
+            ToolCall.new!(%{
+              call_id: "call_abc123",
+              name: "my_fun",
+              arguments: nil
+            })
+          ]
+        })
+
+      assert Message.is_tool_call?(msg)
+    end
+
+    test "returns false when not" do
+      refute Message.is_tool_call?(Message.new_assistant!(%{content: "Howdy"}))
+    end
+  end
+
+  describe "is_tool_related?/1" do
+    test "returns true when a tool call" do
+      msg =
+        Message.new_assistant!(%{
+          tool_calls: [
+            ToolCall.new!(%{
+              call_id: "call_abc123",
+              name: "my_fun",
+              arguments: nil
+            })
+          ]
+        })
+
+      assert Message.is_tool_related?(msg)
+    end
+
+    test "returns true when a tool result" do
+      msg =
+        Message.new_tool_result!(%{
+          tool_results: [
+            ToolResult.new!(%{
+              tool_call_id: "call_123",
+              name: "hello_world",
+              content: "Hello world!"
+            })
+          ]
+        })
+
+      assert Message.is_tool_related?(msg)
+    end
+
+    test "returns false when regular message" do
+      refute Message.is_tool_related?(Message.new_user!("Hi"))
+      refute Message.is_tool_related?(Message.new_assistant!(%{content: "Hello"}))
+    end
+  end
+
+  describe "tool_had_errors?/1" do
+    test "returns true when any tool result had an error" do
+      msg =
+        Message.new_tool_result!(%{
+          tool_results: [
+            ToolResult.new!(%{
+              tool_call_id: "call_123",
+              name: "hello_world",
+              content: "ERROR!",
+              is_error: true
+            })
+          ]
+        })
+
+      assert Message.tool_had_errors?(msg)
+
+      msg =
+        Message.new_tool_result!(%{
+          tool_results: [
+            ToolResult.new!(%{
+              tool_call_id: "call_123",
+              name: "hello_world",
+              content: "Hello world!"
+            }),
+            ToolResult.new!(%{
+              tool_call_id: "call_123",
+              name: "hello_world",
+              content: "ERROR!",
+              is_error: true
+            })
+          ]
+        })
+
+      assert Message.tool_had_errors?(msg)
+    end
+
+    test "returns false when all tool results succeeded" do
+      msg =
+        Message.new_tool_result!(%{
+          tool_results: [
+            ToolResult.new!(%{
+              tool_call_id: "call_123",
+              name: "hello_world",
+              content: "Hello world!"
+            })
+          ]
+        })
+
+      refute Message.tool_had_errors?(msg)
+    end
+
+    test "returns false when not a tool response" do
+      refute Message.tool_had_errors?(Message.new_assistant!(%{content: "Howdy"}))
     end
   end
 end

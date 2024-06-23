@@ -5,6 +5,37 @@ defmodule LangChain.ChatModels.ChatAnthropic do
   Parses and validates inputs for making requests to [Anthropic's messages API](https://docs.anthropic.com/claude/reference/messages_post).
 
   Converts responses into more specialized `LangChain` data structures.
+
+  ## Callbacks
+
+  See the set of available callback: `LangChain.ChatModels.LLMCallbacks`
+
+  ### Rate Limit API Response Headers
+
+  Anthropic returns rate limit information in the response headers. Those can be
+  accessed using an LLM callback like this:
+
+      handlers = %{
+        on_llm_ratelimit_info: fn _model, headers ->
+          IO.inspect(headers)
+        end
+      }
+
+      {:ok, chat} = ChatAnthropic.new(%{callbacks: [handlers]})
+
+  When a request is received, something similar to the following will be output
+  to the console.
+
+      %{
+        "anthropic-ratelimit-requests-limit" => ["50"],
+        "anthropic-ratelimit-requests-remaining" => ["49"],
+        "anthropic-ratelimit-requests-reset" => ["2024-06-08T04:28:30Z"],
+        "anthropic-ratelimit-tokens-limit" => ["50000"],
+        "anthropic-ratelimit-tokens-remaining" => ["50000"],
+        "anthropic-ratelimit-tokens-reset" => ["2024-06-08T04:28:30Z"],
+        "request-id" => ["req_1234"]
+      }
+
   """
   use Ecto.Schema
   require Logger
@@ -19,11 +50,15 @@ defmodule LangChain.ChatModels.ChatAnthropic do
   alias LangChain.Message.ToolCall
   alias LangChain.Message.ToolResult
   alias LangChain.MessageDelta
+  alias LangChain.TokenUsage
   alias LangChain.Function
   alias LangChain.FunctionParam
   alias LangChain.Utils
+  alias LangChain.Callbacks
 
   @behaviour ChatModel
+
+  @current_config_version 1
 
   # allow up to 1 minute for response.
   @receive_timeout 60_000
@@ -75,6 +110,9 @@ defmodule LangChain.ChatModels.ChatAnthropic do
 
     # Whether to stream the response
     field :stream, :boolean, default: false
+
+    # A list of maps for callback handlers
+    field :callbacks, {:array, :map}, default: []
   end
 
   @type t :: %ChatAnthropic{}
@@ -89,7 +127,8 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     :temperature,
     :top_p,
     :top_k,
-    :stream
+    :stream,
+    :callbacks
   ]
   @required_fields [:endpoint, :model]
 
@@ -209,27 +248,28 @@ defmodule LangChain.ChatModels.ChatAnthropic do
   `LangChain.Message` once fully complete.
   """
   @impl ChatModel
-  def call(anthropic, prompt, functions \\ [], callback_fn \\ nil)
+  def call(anthropic, prompt, functions \\ [])
 
-  def call(%ChatAnthropic{} = anthropic, prompt, functions, callback_fn) when is_binary(prompt) do
+  def call(%ChatAnthropic{} = anthropic, prompt, functions) when is_binary(prompt) do
     messages = [
       Message.new_system!(),
       Message.new_user!(prompt)
     ]
 
-    call(anthropic, messages, functions, callback_fn)
+    call(anthropic, messages, functions)
   end
 
-  def call(%ChatAnthropic{} = anthropic, messages, functions, callback_fn)
+  def call(%ChatAnthropic{} = anthropic, messages, functions)
       when is_list(messages) do
     if override_api_return?() do
       Logger.warning("Found override API response. Will not make live API call.")
 
       case get_api_override() do
-        {:ok, {:ok, data} = response} ->
+        {:ok, {:ok, data, callback_name}} ->
           # fire callback for fake responses too
-          Utils.fire_callback(anthropic, data, callback_fn)
-          response
+          Callbacks.fire(anthropic.callbacks, callback_name, [anthropic, data])
+          # return the data portion
+          {:ok, data}
 
         # fake error response
         {:ok, {:error, _reason} = response} ->
@@ -237,12 +277,12 @@ defmodule LangChain.ChatModels.ChatAnthropic do
 
         _other ->
           raise LangChainError,
-                "An unexpected fake API response was set. Should be an `{:ok, value}`"
+                "An unexpected fake API response was set. Should be an `{:ok, value, nil_or_callback_name}`"
       end
     else
       try do
         # make base api request and perform high-level success/failure checks
-        case do_api_request(anthropic, messages, functions, callback_fn) do
+        case do_api_request(anthropic, messages, functions) do
           {:error, reason} ->
             {:error, reason}
 
@@ -263,22 +303,15 @@ defmodule LangChain.ChatModels.ChatAnthropic do
   # - `result` - where `result` is a data-structure like a list or map.
   # - `{:error, reason}` - Where reason is a string explanation of what went wrong.
   #
-  # If a callback_fn is provided, it will fire with each
-  #
   # If `stream: false`, the completed message is returned.
   #
-  # If `stream: true`, the `callback_fn` is executed for the returned MessageDelta
-  # responses.
-  #
-  # Executes the callback function passing the response only parsed to the data
-  # structures.
   # Retries the request up to 3 times on transient errors with a 1 second delay
   @doc false
   @spec do_api_request(t(), [Message.t()], ChatModel.tools(), (any() -> any())) ::
           list() | struct() | {:error, String.t()}
-  def do_api_request(anthropic, messages, tools, callback_fn, retry_count \\ 3)
+  def do_api_request(anthropic, messages, tools, retry_count \\ 3)
 
-  def do_api_request(_anthropic, _messages, _functions, _callback_fn, 0) do
+  def do_api_request(_anthropic, _messages, _functions, 0) do
     raise LangChainError, "Retries exceeded. Connection failed."
   end
 
@@ -286,7 +319,6 @@ defmodule LangChain.ChatModels.ChatAnthropic do
         %ChatAnthropic{stream: false} = anthropic,
         messages,
         tools,
-        callback_fn,
         retry_count
       ) do
     req =
@@ -304,23 +336,33 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     |> Req.post()
     # parse the body and return it as parsed structs
     |> case do
-      {:ok, %Req.Response{body: data}} ->
-        case do_process_response(data) do
+      {:ok, %Req.Response{body: data} = response} ->
+        Callbacks.fire(anthropic.callbacks, :on_llm_ratelimit_info, [
+          anthropic,
+          get_ratelimit_info(response.headers)
+        ])
+
+        Callbacks.fire(anthropic.callbacks, :on_llm_token_usage, [
+          anthropic,
+          get_token_usage(data)
+        ])
+
+        case do_process_response(anthropic, data) do
           {:error, reason} ->
             {:error, reason}
 
           result ->
-            Utils.fire_callback(anthropic, result, callback_fn)
+            Callbacks.fire(anthropic.callbacks, :on_llm_new_message, [anthropic, result])
             result
         end
 
-      {:error, %Mint.TransportError{reason: :timeout}} ->
+      {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, "Request timed out"}
 
-      {:error, %Mint.TransportError{reason: :closed}} ->
+      {:error, %Req.TransportError{reason: :closed}} ->
         # Force a retry by making a recursive call decrementing the counter
         Logger.debug(fn -> "Mint connection closed: retry count = #{inspect(retry_count)}" end)
-        do_api_request(anthropic, messages, tools, callback_fn, retry_count - 1)
+        do_api_request(anthropic, messages, tools, retry_count - 1)
 
       other ->
         Logger.error("Unexpected and unhandled API response! #{inspect(other)}")
@@ -332,7 +374,6 @@ defmodule LangChain.ChatModels.ChatAnthropic do
         %ChatAnthropic{stream: true} = anthropic,
         messages,
         tools,
-        callback_fn,
         retry_count
       ) do
     Req.new(
@@ -343,22 +384,27 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     )
     |> Req.post(
       into:
-        Utils.handle_stream_fn(anthropic, &decode_stream/1, &do_process_response/1, callback_fn)
+        Utils.handle_stream_fn(anthropic, &decode_stream/1, &do_process_response(anthropic, &1))
     )
     |> case do
-      {:ok, %Req.Response{body: data}} ->
+      {:ok, %Req.Response{body: data} = response} ->
+        Callbacks.fire(anthropic.callbacks, :on_llm_ratelimit_info, [
+          anthropic,
+          get_ratelimit_info(response.headers)
+        ])
+
         data
 
       {:error, %LangChainError{message: reason}} ->
         {:error, reason}
 
-      {:error, %Mint.TransportError{reason: :timeout}} ->
+      {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, "Request timed out"}
 
-      {:error, %Mint.TransportError{reason: :closed}} ->
+      {:error, %Req.TransportError{reason: :closed}} ->
         # Force a retry by making a recursive call decrementing the counter
         Logger.debug(fn -> "Mint connection closed: retry count = #{inspect(retry_count)}" end)
-        do_api_request(anthropic, messages, tools, callback_fn, retry_count - 1)
+        do_api_request(anthropic, messages, tools, retry_count - 1)
 
       other ->
         Logger.error(
@@ -381,13 +427,13 @@ defmodule LangChain.ChatModels.ChatAnthropic do
 
   # Parse a new message response
   @doc false
-  @spec do_process_response(data :: %{String.t() => any()} | {:error, any()}) ::
+  @spec do_process_response(t(), data :: %{String.t() => any()} | {:error, any()}) ::
           Message.t()
           | [Message.t()]
           | MessageDelta.t()
           | [MessageDelta.t()]
           | {:error, String.t()}
-  def do_process_response(%{
+  def do_process_response(_model, %{
         "role" => "assistant",
         "content" => contents,
         "stop_reason" => stop_reason
@@ -406,7 +452,7 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     end)
   end
 
-  def do_process_response(%{
+  def do_process_response(_model, %{
         "type" => "content_block_start",
         "content_block" => %{"type" => "text", "text" => content}
       }) do
@@ -419,7 +465,7 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     |> to_response()
   end
 
-  def do_process_response(%{
+  def do_process_response(_model, %{
         "type" => "content_block_delta",
         "delta" => %{"type" => "text_delta", "text" => content}
       }) do
@@ -432,10 +478,17 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     |> to_response()
   end
 
-  def do_process_response(%{
-        "type" => "message_delta",
-        "delta" => %{"stop_reason" => stop_reason}
-      }) do
+  def do_process_response(
+        model,
+        %{
+          "type" => "message_delta",
+          "delta" => %{"stop_reason" => stop_reason},
+          "usage" => _usage
+        } = data
+      ) do
+    # if we received usage data, fire any callbacks for it.
+    Callbacks.fire(model.callbacks, :on_llm_token_usage, [model, get_token_usage(data)])
+
     %{
       role: :assistant,
       content: "",
@@ -445,18 +498,18 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     |> to_response()
   end
 
-  def do_process_response(%{"error" => %{"message" => reason}}) do
+  def do_process_response(_model, %{"error" => %{"message" => reason}}) do
     Logger.error("Received error from API: #{inspect(reason)}")
     {:error, reason}
   end
 
-  def do_process_response({:error, %Jason.DecodeError{} = response}) do
+  def do_process_response(_model, {:error, %Jason.DecodeError{} = response}) do
     error_message = "Received invalid JSON: #{inspect(response)}"
     Logger.error(error_message)
     {:error, error_message}
   end
 
-  def do_process_response(other) do
+  def do_process_response(_model, other) do
     Logger.error("Trying to process an unexpected response. #{inspect(other)}")
     {:error, "Unexpected response"}
   end
@@ -475,6 +528,10 @@ defmodule LangChain.ChatModels.ChatAnthropic do
        ) do
     arguments =
       case call["input"] do
+        # when properties is an empty string, treat it as nil
+        %{"properties" => ""} ->
+          nil
+
         # when properties is an empty map, treat it as nil
         %{"properties" => %{} = props} when props == %{} ->
           nil
@@ -649,12 +706,38 @@ defmodule LangChain.ChatModels.ChatAnthropic do
   end
 
   def for_api(%ContentPart{type: :image} = part) do
+    media =
+      case Keyword.fetch!(part.options || [], :media) do
+        :png ->
+          "image/png"
+
+        :gif ->
+          "image/gif"
+
+        :jpg ->
+          "image/jpeg"
+
+        :jpeg ->
+          "image/jpeg"
+
+        :webp ->
+          "image/webp"
+
+        value when is_binary(value) ->
+          value
+
+        other ->
+          message = "Received unsupported media type for ContentPart: #{inspect(other)}"
+          Logger.error(message)
+          raise LangChainError, message
+      end
+
     %{
       "type" => "image",
       "source" => %{
         "type" => "base64",
         "data" => part.content,
-        "media_type" => Keyword.fetch!(part.options, :media)
+        "media_type" => media
       }
     }
   end
@@ -750,5 +833,70 @@ defmodule LangChain.ChatModels.ChatAnthropic do
   defp get_merge_friendly_user_content(%{"role" => "user", "content" => content} = item)
        when is_list(content) do
     item
+  end
+
+  defp get_ratelimit_info(response_headers) do
+    # extract out all the ratelimit response headers
+    #
+    #  https://docs.anthropic.com/en/api/rate-limits#response-headers
+    {return, _} =
+      Map.split(response_headers, [
+        "anthropic-ratelimit-requests-limit",
+        "anthropic-ratelimit-requests-remaining",
+        "anthropic-ratelimit-requests-reset",
+        "anthropic-ratelimit-tokens-limit",
+        "anthropic-ratelimit-tokens-remaining",
+        "anthropic-ratelimit-tokens-reset",
+        "retry-after",
+        "request-id"
+      ])
+
+    return
+  end
+
+  defp get_token_usage(%{"usage" => usage} = _response_body) do
+    # extract out the reported response token usage
+    #
+    #    defp get_token_usage(%{"usage" => usage} = _response_body) do
+    # extract out the reported response token usage
+    #
+    #  https://platform.openai.com/docs/api-reference/chat/object#chat/object-usage
+    TokenUsage.new!(%{
+      input: Map.get(usage, "input_tokens"),
+      output: Map.get(usage, "output_tokens")
+    })
+  end
+
+  defp get_token_usage(_response_body), do: %{}
+
+  @doc """
+  Generate a config map that can later restore the model's configuration.
+  """
+  @impl ChatModel
+  @spec serialize_config(t()) :: %{String.t() => any()}
+  def serialize_config(%ChatAnthropic{} = model) do
+    Utils.to_serializable_map(
+      model,
+      [
+        :endpoint,
+        :model,
+        :api_version,
+        :temperature,
+        :max_tokens,
+        :receive_timeout,
+        :top_p,
+        :top_k,
+        :stream
+      ],
+      @current_config_version
+    )
+  end
+
+  @doc """
+  Restores the model from the config.
+  """
+  @impl ChatModel
+  def restore_from_map(%{"version" => 1} = data) do
+    ChatAnthropic.new(data)
   end
 end

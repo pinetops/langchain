@@ -4,6 +4,10 @@ defmodule LangChain.Utils do
   """
   alias LangChain.LangChainError
   alias Ecto.Changeset
+  alias LangChain.Callbacks
+  alias LangChain.Message
+  alias LangChain.MessageDelta
+  alias LangChain.TokenUsage
   require Logger
 
   @doc """
@@ -85,41 +89,29 @@ defmodule LangChain.Utils do
     end
   end
 
-  @type callback_data ::
-          {:ok, Message.t() | MessageDelta.t() | [Message.t() | MessageDelta.t()]}
-          | {:error, String.t()}
+  @type callback_data :: Message.t() | MessageDelta.t() | TokenUsage.t() | {:error, String.t()}
 
   @doc """
   Fire a streaming callback if present.
   """
-  @spec fire_callback(
-          %{optional(:stream) => boolean()},
-          data :: callback_data() | [callback_data()],
-          (callback_data() -> any())
-        ) :: :ok
-  def fire_callback(%{stream: true}, _data, nil) do
-    Logger.warning("Streaming call requested but no callback function was given.")
-    :ok
-  end
-
-  def fire_callback(_model, _data, nil), do: :ok
+  @spec fire_streamed_callback(
+          %{optional(:stream) => boolean(), callbacks: [map()]},
+          data :: callback_data() | [callback_data()]
+        ) :: :ok | no_return()
 
   # fire a set of callbacks when receiving a list
-  def fire_callback(_model, data, callback_fn) when is_list(data) and is_function(callback_fn) do
-    # OPTIONAL: Execute callback function
+  def fire_streamed_callback(model, data) when is_list(data) do
+    # Execute callback handler for each received data element
     data
     |> List.flatten()
-    |> Enum.each(fn item -> callback_fn.(item) end)
-
-    :ok
+    |> Enum.each(fn item ->
+      fire_streamed_callback(model, item)
+    end)
   end
 
-  def fire_callback(_model, data, callback_fn)
-      when is_struct(data) and is_function(callback_fn) do
-    # OPTIONAL: Execute callback function
-    callback_fn.(data)
-
-    :ok
+  def fire_streamed_callback(model, %MessageDelta{} = delta) do
+    # Execute callback handler for single received delta element
+    Callbacks.fire(model.callbacks, :on_llm_new_delta, [model, delta])
   end
 
   @doc """
@@ -145,10 +137,9 @@ defmodule LangChain.Utils do
   @spec handle_stream_fn(
           %{optional(:stream) => boolean()},
           decode_stream_fn :: function(),
-          transform_data_fn :: function(),
-          callback_fn :: function()
+          transform_data_fn :: function()
         ) :: function()
-  def handle_stream_fn(model, decode_stream_fn, transform_data_fn, callback_fn) do
+  def handle_stream_fn(model, decode_stream_fn, transform_data_fn) do
     fn
       {:data, raw_data}, {req, %Req.Response{status: 200} = response} ->
         # Fetch any previously incomplete messages that are buffered in the
@@ -160,11 +151,14 @@ defmodule LangChain.Utils do
           decode_stream_fn.({raw_data, buffered})
 
         # transform what was fully received into structs
-        parsed_data = Enum.map(parsed_data, transform_data_fn)
-        # parsed_data = Enum.map(parsed_data, &transform_data_fn.(&1))
+        parsed_data =
+          parsed_data
+          |> Enum.map(transform_data_fn)
+          |> Enum.reject(&(&1 == :skip))
 
-        # execute the callback function for each MessageDelta
-        fire_callback(model, parsed_data, callback_fn)
+        # execute the callback function for each MessageDelta and an optional
+        # TokenUsage
+        fire_streamed_callback(model, parsed_data)
         old_body = if response.body == "", do: [], else: response.body
 
         # Returns %Req.Response{} where the body contains ALL the stream delta
@@ -227,5 +221,68 @@ defmodule LangChain.Utils do
     else
       List.replace_at(list, index, value)
     end
+  end
+
+  @doc """
+  Given a struct, create a map with the selected keys converted to strings.
+  Additionally includes a `version` number for the data.
+  """
+  @spec to_serializable_map(struct(), keys :: [atom()], version :: integer()) :: %{
+          String.t() => any()
+        }
+  def to_serializable_map(%module{} = struct, keys, version \\ 1) do
+    struct
+    |> Map.from_struct()
+    |> Map.take(keys)
+    |> stringify_keys()
+    |> Map.put("module", Atom.to_string(module))
+    |> Map.put("version", version)
+  end
+
+  @doc """
+  Convert map atom keys to strings
+
+  Original source: https://gist.github.com/kipcole9/0bd4c6fb6109bfec9955f785087f53fb
+  """
+  def stringify_keys(nil), do: nil
+
+  def stringify_keys(map = %{}) do
+    map
+    |> Enum.map(fn {k, v} -> {to_string(k), stringify_keys(v)} end)
+    |> Enum.into(%{})
+  end
+
+  # Walk the list and stringify the keys of
+  # of any map members
+  def stringify_keys([head | rest]) do
+    [stringify_keys(head) | stringify_keys(rest)]
+  end
+
+  def stringify_keys(not_a_map) when is_atom(not_a_map) and not is_boolean(not_a_map) do
+    Atom.to_string(not_a_map)
+  end
+
+  def stringify_keys(not_a_map) do
+    not_a_map
+  end
+
+  @doc """
+  Return an `{:ok, module}` when the string successfully converts to an existing
+  module.
+  """
+  def module_from_name("Elixir." <> _rest = module_name) do
+    try do
+      {:ok, String.to_existing_atom(module_name)}
+    rescue
+      _err ->
+        Logger.error("Failed to restore using module_name #{inspect(module_name)}. Not found.")
+        {:error, "ChatModel module #{inspect(module_name)} not found"}
+    end
+  end
+
+  def module_from_name(module_name) do
+    msg = "Not an Elixir module: #{inspect(module_name)}"
+    Logger.error(msg)
+    {:error, msg}
   end
 end

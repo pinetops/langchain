@@ -1,4 +1,4 @@
-defmodule LangChain.ChatModels.ChatGoogleAI do
+defmodule LangChain.ChatModels.ChatVertexAI do
   @moduledoc """
   Parses and validates inputs for making a request for the Google AI  Chat API.
 
@@ -24,19 +24,13 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
 
   @current_config_version 1
 
-  @default_base_url "https://generativelanguage.googleapis.com"
-  @default_api_version "v1beta"
-  @default_endpoint "#{@default_base_url}/#{@default_api_version}"
-
   # allow up to 2 minutes for response.
   @receive_timeout 60_000
 
   @primary_key false
   embedded_schema do
-    field :endpoint, :string, default: @default_endpoint
+    field :endpoint, :string
 
-    # The version of the API to use.
-    field :api_version, :string, default: @default_api_version
     field :model, :string, default: "gemini-pro"
     field :api_key, :string
 
@@ -68,16 +62,16 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     field :receive_timeout, :integer, default: @receive_timeout
 
     field :stream, :boolean, default: false
+    field :json_response, :boolean, default: false
 
     # A list of maps for callback handlers
     field :callbacks, {:array, :map}, default: []
   end
 
-  @type t :: %ChatGoogleAI{}
+  @type t :: %ChatVertexAI{}
 
   @create_fields [
     :endpoint,
-    :api_version,
     :model,
     :api_key,
     :temperature,
@@ -85,33 +79,33 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     :top_k,
     :receive_timeout,
     :stream,
+    :json_response,
     :callbacks
   ]
   @required_fields [
     :endpoint,
-    :api_version,
     :model
   ]
 
   @spec get_api_key(t) :: String.t()
-  defp get_api_key(%ChatGoogleAI{api_key: api_key}) do
+  defp get_api_key(%ChatVertexAI{api_key: api_key}) do
     # if no API key is set default to `""` which will raise an API error
-    api_key || Config.resolve(:google_ai_key, "")
+    api_key || Config.resolve(:vertex_ai_key, "")
   end
 
   @doc """
-  Setup a ChatGoogleAI client configuration.
+  Setup a ChatVertexAI client configuration.
   """
   @spec new(attrs :: map()) :: {:ok, t} | {:error, Ecto.Changeset.t()}
   def new(%{} = attrs \\ %{}) do
-    %ChatGoogleAI{}
+    %ChatVertexAI{}
     |> cast(attrs, @create_fields)
     |> common_validation()
     |> apply_action(:insert)
   end
 
   @doc """
-  Setup a ChatGoogleAI client configuration and return it or raise an error if invalid.
+  Setup a ChatVertexAI client configuration and return it or raise an error if invalid.
   """
   @spec new!(attrs :: map()) :: t() | no_return()
   def new!(attrs \\ %{}) do
@@ -129,7 +123,7 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     |> validate_required(@required_fields)
   end
 
-  def for_api(%ChatGoogleAI{} = google_ai, messages, functions) do
+  def for_api(%ChatVertexAI{} = vertex_ai, messages, functions) do
     messages_for_api =
       messages
       |> Enum.map(&for_api/1)
@@ -139,11 +133,19 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     req = %{
       "contents" => messages_for_api,
       "generationConfig" => %{
-        "temperature" => google_ai.temperature,
-        "topP" => google_ai.top_p,
-        "topK" => google_ai.top_k
+        "temperature" => vertex_ai.temperature,
+        "topP" => vertex_ai.top_p,
+        "topK" => vertex_ai.top_k
       }
     }
+
+    req =
+      if vertex_ai.json_response do
+        req
+        |> put_in(["generationConfig", "response_mime_type"], "application/json")
+      else
+        req
+      end
 
     if functions && not Enum.empty?(functions) do
       req
@@ -191,6 +193,13 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     ]
   end
 
+  defp for_api(%Message{role: :user, content: content}) when is_list(content) do
+    %{
+      "role" => "user",
+      "parts" => Enum.map(content, &for_api(&1))
+    }
+  end
+
   defp for_api(%Message{} = message) do
     %{
       "role" => map_role(message.role),
@@ -200,6 +209,24 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
 
   defp for_api(%ContentPart{type: :text} = part) do
     %{"text" => part.content}
+  end
+
+  defp for_api(%ContentPart{type: :image} = part) do
+    %{
+      "inlineData" => %{
+        "mimeType" => Keyword.fetch!(part.options, :media),
+        "data" => part.content
+      }
+    }
+  end
+
+  defp for_api(%ContentPart{type: :image_url} = part) do
+    %{
+      "fileData" => %{
+        "mimeType" => Keyword.fetch!(part.options, :media),
+        "data" => part.content
+      }
+    }
   end
 
   defp for_api(%ToolCall{} = call) do
@@ -221,41 +248,39 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
   end
 
   @doc """
-  Calls the Google AI API passing the ChatGoogleAI struct with configuration, plus
-  either a simple message or the list of messages to act as the prompt.
+  Calls the Google AI API passing the ChatVertexAI struct with configuration,
+  plus either a simple message or the list of messages to act as the prompt.
 
   Optionally pass in a list of tools available to the LLM for requesting
   execution in response.
 
-  Optionally pass in a callback function that can be executed as data is
-  received from the API.
-
   **NOTE:** This function *can* be used directly, but the primary interface
-  should be through `LangChain.Chains.LLMChain`. The `ChatGoogleAI` module is more focused on
-  translating the `LangChain` data structures to and from the OpenAI API.
+  should be through `LangChain.Chains.LLMChain`. The `ChatVertexAI` module is
+  more focused on translating the `LangChain` data structures to and from the
+  OpenAI API.
 
   Another benefit of using `LangChain.Chains.LLMChain` is that it combines the
-  storage of messages, adding tools, adding custom context that should be
-  passed to tools, and automatically applying `LangChain.MessageDelta`
-  structs as they are are received, then converting those to the full
-  `LangChain.Message` once fully complete.
+  storage of messages, adding tools, adding custom context that should be passed
+  to tools, and automatically applying `LangChain.MessageDelta` structs as they
+  are are received, then converting those to the full `LangChain.Message` once
+  fully complete.
   """
   @impl ChatModel
   def call(openai, prompt, tools \\ [])
 
-  def call(%ChatGoogleAI{} = google_ai, prompt, tools) when is_binary(prompt) do
+  def call(%ChatVertexAI{} = vertex_ai, prompt, tools) when is_binary(prompt) do
     messages = [
       Message.new_system!(),
       Message.new_user!(prompt)
     ]
 
-    call(google_ai, messages, tools)
+    call(vertex_ai, messages, tools)
   end
 
-  def call(%ChatGoogleAI{} = google_ai, messages, tools)
+  def call(%ChatVertexAI{} = vertex_ai, messages, tools)
       when is_list(messages) do
     try do
-      case do_api_request(google_ai, messages, tools) do
+      case do_api_request(vertex_ai, messages, tools) do
         {:error, reason} ->
           {:error, reason}
 
@@ -271,14 +296,15 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
   @doc false
   @spec do_api_request(t(), [Message.t()], [Function.t()]) ::
           list() | struct() | {:error, String.t()}
-  def do_api_request(%ChatGoogleAI{stream: false} = google_ai, messages, tools) do
+  def do_api_request(%ChatVertexAI{stream: false} = vertex_ai, messages, tools) do
     req =
       Req.new(
-        url: build_url(google_ai),
-        json: for_api(google_ai, messages, tools),
-        receive_timeout: google_ai.receive_timeout,
+        url: build_url(vertex_ai),
+        json: for_api(vertex_ai, messages, tools),
+        receive_timeout: vertex_ai.receive_timeout,
         retry: :transient,
         max_retries: 3,
+        auth: {:bearer, get_api_key(vertex_ai)},
         retry_delay: fn attempt -> 300 * attempt end
       )
 
@@ -286,12 +312,12 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     |> Req.post()
     |> case do
       {:ok, %Req.Response{body: data}} ->
-        case do_process_response(google_ai, data) do
+        case do_process_response(data) do
           {:error, reason} ->
             {:error, reason}
 
           result ->
-            Callbacks.fire(google_ai.callbacks, :on_llm_new_message, [google_ai, result])
+            Callbacks.fire(vertex_ai.callbacks, :on_llm_new_message, [vertex_ai, result])
             result
         end
 
@@ -304,19 +330,20 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     end
   end
 
-  def do_api_request(%ChatGoogleAI{stream: true} = google_ai, messages, tools) do
+  def do_api_request(%ChatVertexAI{stream: true} = vertex_ai, messages, tools) do
     Req.new(
-      url: build_url(google_ai),
-      json: for_api(google_ai, messages, tools),
-      receive_timeout: google_ai.receive_timeout
+      url: build_url(vertex_ai),
+      json: for_api(vertex_ai, messages, tools),
+      auth: {:bearer, get_api_key(vertex_ai)},
+      receive_timeout: vertex_ai.receive_timeout
     )
     |> Req.Request.put_header("accept-encoding", "utf-8")
     |> Req.post(
       into:
         Utils.handle_stream_fn(
-          google_ai,
+          vertex_ai,
           &ChatOpenAI.decode_stream/1,
-          &do_process_response(google_ai, &1, MessageDelta)
+          &do_process_response(&1, MessageDelta)
         )
     )
     |> case do
@@ -342,38 +369,31 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
   end
 
   @spec build_url(t()) :: String.t()
-  defp build_url(
-         %ChatGoogleAI{endpoint: endpoint, api_version: api_version, model: model} = google_ai
-       ) do
-    "#{endpoint}/#{api_version}/models/#{model}:#{get_action(google_ai)}?key=#{get_api_key(google_ai)}"
-    |> use_sse(google_ai)
+  defp build_url(%ChatVertexAI{endpoint: endpoint, model: model} = vertex_ai) do
+    "#{endpoint}/models/#{model}:#{get_action(vertex_ai)}?key=#{get_api_key(vertex_ai)}"
+    |> use_sse(vertex_ai)
   end
 
   @spec use_sse(String.t(), t()) :: String.t()
-  defp use_sse(url, %ChatGoogleAI{stream: true}), do: url <> "&alt=sse"
+  defp use_sse(url, %ChatVertexAI{stream: true}), do: url <> "&alt=sse"
   defp use_sse(url, _model), do: url
 
   @spec get_action(t()) :: String.t()
-  defp get_action(%ChatGoogleAI{stream: false}), do: "generateContent"
-  defp get_action(%ChatGoogleAI{stream: true}), do: "streamGenerateContent"
+  defp get_action(%ChatVertexAI{stream: false}), do: "generateContent"
+  defp get_action(%ChatVertexAI{stream: true}), do: "streamGenerateContent"
 
   def complete_final_delta(data) when is_list(data) do
     update_in(data, [Access.at(-1), Access.at(-1)], &%{&1 | status: :complete})
   end
 
-  def do_process_response(model, response, message_type \\ Message)
+  def do_process_response(response, message_type \\ Message)
 
-  def do_process_response(model, %{"candidates" => candidates}, message_type)
-      when is_list(candidates) do
+  def do_process_response(%{"candidates" => candidates}, message_type) when is_list(candidates) do
     candidates
-    |> Enum.map(&do_process_response(model, &1, message_type))
+    |> Enum.map(&do_process_response(&1, message_type))
   end
 
-  def do_process_response(
-        model,
-        %{"content" => %{"parts" => parts} = content_data} = data,
-        Message
-      ) do
+  def do_process_response(%{"content" => %{"parts" => parts} = content_data} = data, Message) do
     text_part =
       parts
       |> filter_parts_for_types(["text"])
@@ -385,14 +405,14 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
       parts
       |> filter_parts_for_types(["functionCall"])
       |> Enum.map(fn part ->
-        do_process_response(model, part, nil)
+        do_process_response(part, nil)
       end)
 
     tool_result_from_parts =
       parts
       |> filter_parts_for_types(["functionResponse"])
       |> Enum.map(fn part ->
-        do_process_response(model, part, nil)
+        do_process_response(part, nil)
       end)
 
     %{
@@ -413,11 +433,7 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     end
   end
 
-  def do_process_response(
-        model,
-        %{"content" => %{"parts" => parts} = content_data} = data,
-        MessageDelta
-      ) do
+  def do_process_response(%{"content" => %{"parts" => parts} = content_data} = data, MessageDelta) do
     text_content =
       case parts do
         [%{"text" => text}] ->
@@ -437,7 +453,7 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
       parts
       |> filter_parts_for_types(["functionCall"])
       |> Enum.map(fn part ->
-        do_process_response(model, part, nil)
+        do_process_response(part, nil)
       end)
 
     %{
@@ -457,11 +473,7 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     end
   end
 
-  def do_process_response(
-        _model,
-        %{"functionCall" => %{"args" => raw_args, "name" => name}} = data,
-        _
-      ) do
+  def do_process_response(%{"functionCall" => %{"args" => raw_args, "name" => name}} = data, _) do
     %{
       call_id: "call-#{name}",
       name: name,
@@ -480,7 +492,6 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
   end
 
   def do_process_response(
-        _model,
         %{
           "finishReason" => finish,
           "content" => %{"parts" => parts, "role" => role},
@@ -524,18 +535,18 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     end
   end
 
-  def do_process_response(_model, %{"error" => %{"message" => reason}}, _) do
+  def do_process_response(%{"error" => %{"message" => reason}}, _) do
     Logger.error("Received error from API: #{inspect(reason)}")
     {:error, reason}
   end
 
-  def do_process_response(_model, {:error, %Jason.DecodeError{} = response}, _) do
+  def do_process_response({:error, %Jason.DecodeError{} = response}, _) do
     error_message = "Received invalid JSON: #{inspect(response)}"
     Logger.error(error_message)
     {:error, error_message}
   end
 
-  def do_process_response(_model, other, _) do
+  def do_process_response(other, _) do
     Logger.error("Trying to process an unexpected response. #{inspect(other)}")
     {:error, "Unexpected response"}
   end
@@ -582,17 +593,17 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
   """
   @impl ChatModel
   @spec serialize_config(t()) :: %{String.t() => any()}
-  def serialize_config(%ChatGoogleAI{} = model) do
+  def serialize_config(%ChatVertexAI{} = model) do
     Utils.to_serializable_map(
       model,
       [
         :endpoint,
         :model,
-        :api_version,
         :temperature,
         :top_p,
         :top_k,
         :receive_timeout,
+        :json_response,
         :stream
       ],
       @current_config_version
@@ -604,6 +615,6 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
   """
   @impl ChatModel
   def restore_from_map(%{"version" => 1} = data) do
-    ChatGoogleAI.new(data)
+    ChatVertexAI.new(data)
   end
 end
