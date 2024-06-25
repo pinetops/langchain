@@ -308,6 +308,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
 
     req
     |> Req.post()
+    |> IO.inspect()
     |> case do
       {:ok, %Req.Response{body: data}} ->
         case do_process_response(data) do
