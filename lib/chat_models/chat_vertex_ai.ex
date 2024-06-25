@@ -309,6 +309,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
       )
 
     req
+    |> IO.inspect()
     |> Req.post()
     |> IO.inspect()
     |> case do
