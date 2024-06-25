@@ -299,6 +299,8 @@ defmodule LangChain.ChatModels.ChatVertexAI do
           list() | struct() | {:error, String.t()}
   def do_api_request(%ChatVertexAI{stream: false} = vertex_ai, messages, tools) do
     IO.puts("HERE!!!")
+    IO.inspect(for_api(vertex_ai, messages, tools), label: "MY LABEL")
+
     req =
       Req.new(
         url: build_url(vertex_ai),
@@ -309,7 +311,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
         auth: {:bearer, get_api_key(vertex_ai)},
         retry_delay: fn attempt -> 300 * attempt end
       )
-    IO.inspect(for_api(vertex_ai, messages, tools), label: "MY LABEL")
+
    
     req
     |> IO.inspect()
