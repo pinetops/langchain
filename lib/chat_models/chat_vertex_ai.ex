@@ -280,6 +280,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
   def call(%ChatVertexAI{} = vertex_ai, messages, tools)
       when is_list(messages) do
     try do
+      IO.inspect(messages, label: "MESSAGES!")
       case do_api_request(vertex_ai, messages, tools) do
         {:error, reason} ->
           {:error, reason}
