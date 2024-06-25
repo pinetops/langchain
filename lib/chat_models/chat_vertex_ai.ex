@@ -298,7 +298,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
   @spec do_api_request(t(), [Message.t()], [Function.t()]) ::
           list() | struct() | {:error, String.t()}
   def do_api_request(%ChatVertexAI{stream: false} = vertex_ai, messages, tools) do
-    Logger.error(("HERE!!!")
+    Logger.error("HERE!!!")
     Logger.error(inspect(for_api(vertex_ai, messages, tools), label: "MY LABEL"))
 
     req =
