@@ -309,6 +309,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
         retry: :transient,
         max_retries: 3,
         auth: {:bearer, get_api_key(vertex_ai)},
+	connect_options: [timeout: 120_000, protocols: [:http1]],
         retry_delay: fn attempt -> 300 * attempt end
       )
 
